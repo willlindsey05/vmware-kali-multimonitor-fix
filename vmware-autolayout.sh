@@ -276,26 +276,7 @@ main() {
         exit 1
     fi
 
-    # --- Step 6: Save XFCE display config ---
-
-    if [ "${XDG_CURRENT_DESKTOP:-}" = "XFCE" ] && command -v xfconf-query &>/dev/null; then
-        D1_RES=$(xrandr | grep "^$DISPLAY1" | grep -oP '\d+x\d+' | head -1)
-        D2_RES=$(xrandr | grep "^$DISPLAY2" | grep -oP '\d+x\d+' | head -1)
-        D1_X=$(xrandr | grep "^$DISPLAY1" | grep -oP '\d+x\d+\+\K\d+' | head -1)
-        D2_X=$(xrandr | grep "^$DISPLAY2" | grep -oP '\d+x\d+\+\K\d+' | head -1)
-
-        xfconf-query -c displays -p "/Default/$DISPLAY1/Active" -s true 2>/dev/null
-        xfconf-query -c displays -p "/Default/$DISPLAY1/Position/X" -s "${D1_X:-0}" 2>/dev/null
-        xfconf-query -c displays -p "/Default/$DISPLAY1/Position/Y" -s 0 2>/dev/null
-        xfconf-query -c displays -p "/Default/$DISPLAY1/Resolution" -s "${D1_RES:-1920x1080}" 2>/dev/null
-        xfconf-query -c displays -p "/Default/$DISPLAY2/Active" -s true 2>/dev/null
-        xfconf-query -c displays -p "/Default/$DISPLAY2/Position/X" -s "${D2_X:-1920}" 2>/dev/null
-        xfconf-query -c displays -p "/Default/$DISPLAY2/Position/Y" -s 0 2>/dev/null
-        xfconf-query -c displays -p "/Default/$DISPLAY2/Resolution" -s "${D2_RES:-1920x1080}" 2>/dev/null
-        info "Saved XFCE display configuration"
-    fi
-
-    # --- Step 7: Install and start persistent watcher ---
+    # --- Step 6: Install and start persistent watcher ---
 
     sudo tee "$WATCHER_AUTOSTART" > /dev/null << EOF
 [Desktop Entry]
@@ -317,6 +298,25 @@ EOF
         info "Watcher running (PID $WATCHER_PID)"
     else
         warn "Watcher failed to start — check /tmp/vmware-autolayout.log"
+    fi
+
+    # --- Step 7: Save XFCE display config (optional, best-effort) ---
+
+    if [ "${XDG_CURRENT_DESKTOP:-}" = "XFCE" ] && command -v xfconf-query &>/dev/null; then
+        D1_RES=$(xrandr | grep "^$DISPLAY1" | grep -oP '\d+x\d+' | head -1)
+        D2_RES=$(xrandr | grep "^$DISPLAY2" | grep -oP '\d+x\d+' | head -1)
+        D1_X=$(xrandr | grep "^$DISPLAY1" | grep -oP '\d+x\d+\+\K\d+' | head -1)
+        D2_X=$(xrandr | grep "^$DISPLAY2" | grep -oP '\d+x\d+\+\K\d+' | head -1)
+
+        xfconf-query -c displays -p "/Default/$DISPLAY1/Active" --create -t string -s true 2>/dev/null || true
+        xfconf-query -c displays -p "/Default/$DISPLAY1/Position/X" --create -t string -s "${D1_X:-0}" 2>/dev/null || true
+        xfconf-query -c displays -p "/Default/$DISPLAY1/Position/Y" --create -t string -s 0 2>/dev/null || true
+        xfconf-query -c displays -p "/Default/$DISPLAY1/Resolution" --create -t string -s "${D1_RES:-1920x1080}" 2>/dev/null || true
+        xfconf-query -c displays -p "/Default/$DISPLAY2/Active" --create -t string -s true 2>/dev/null || true
+        xfconf-query -c displays -p "/Default/$DISPLAY2/Position/X" --create -t string -s "${D2_X:-1920}" 2>/dev/null || true
+        xfconf-query -c displays -p "/Default/$DISPLAY2/Position/Y" --create -t string -s 0 2>/dev/null || true
+        xfconf-query -c displays -p "/Default/$DISPLAY2/Resolution" --create -t string -s "${D2_RES:-1920x1080}" 2>/dev/null || true
+        info "Saved XFCE display configuration"
     fi
 
     echo ""
