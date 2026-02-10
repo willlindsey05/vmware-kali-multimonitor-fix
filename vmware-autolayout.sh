@@ -18,7 +18,7 @@ SCRIPT_PATH="$SCRIPT_DIR/$(basename "$0")"
 WATCHER_AUTOSTART="/etc/xdg/autostart/vmware-autolayout.desktop"
 XAUTORESIZE_AUTOSTART="/etc/xdg/autostart/xautoresize.desktop"
 TOOLS_CONF="/etc/vmware-tools/tools.conf"
-SETTLE_DELAY=1
+SETTLE_DELAY=2
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -29,6 +29,43 @@ info()  { echo -e "${GREEN}[+]${NC} $1"; }
 warn()  { echo -e "${YELLOW}[!]${NC} $1"; }
 error() { echo -e "${RED}[-]${NC} $1"; }
 log()   { echo "[$(date '+%H:%M:%S')] $1"; }
+
+# Get the preferred mode (marked with +) for a display, or first listed mode
+get_preferred_mode() {
+    local display="$1"
+    local mode
+    mode=$(xrandr | sed -n "/^${display} /,/^[^ ]/p" | grep -v '^\S' | grep '+' | grep -oP '^\s+\K\d+x\d+' | head -1 || true)
+    if [ -z "$mode" ]; then
+        mode=$(xrandr | sed -n "/^${display} /,/^[^ ]/p" | grep -v '^\S' | grep -oP '^\s+\K\d+x\d+' | head -1 || true)
+    fi
+    echo "$mode"
+}
+
+# Get active mode from the status line, empty if display is inactive
+get_active_mode() {
+    local display="$1"
+    xrandr | grep "^${display} " | grep -oP '\d+x\d+\+' | head -1 | grep -oP '\d+x\d+' || true
+}
+
+# Apply extended layout using a single atomic xrandr command
+extend_displays() {
+    local connected="$1"
+    local args="" x_pos=0
+
+    for d in $connected; do
+        local mode
+        mode=$(get_preferred_mode "$d")
+        if [ -z "$mode" ]; then
+            mode="1920x1080"
+        fi
+        args="$args --output $d --mode $mode --pos ${x_pos}x0"
+        local w
+        w=$(echo "$mode" | cut -dx -f1)
+        x_pos=$((x_pos + w))
+    done
+
+    xrandr $args
+}
 
 # =========================================================================
 # Watch mode — runs as a background daemon watching for display changes
@@ -48,45 +85,48 @@ watch_mode() {
             local display
             display=$(echo "$connected" | head -1)
             local preferred current
-            preferred=$(xrandr | sed -n "/^$display /,/^[^ ]/p" | grep -v '^\S' | grep '+' | grep -oP '^\s+\K\d+x\d+' | head -1 || true)
-            current=$(xrandr | grep "^$display" | grep -oP '\d+x\d+' | head -1)
+            preferred=$(get_preferred_mode "$display")
+            current=$(get_active_mode "$display")
 
             if [ -n "$preferred" ] && [ "$preferred" != "$current" ]; then
-                log "Single display: resizing $display from $current to $preferred"
+                log "Single display: resizing $display from ${current:-inactive} to $preferred"
                 xrandr --output "$display" --mode "$preferred"
             else
-                log "Single display ($current), already at preferred size"
+                log "Single display (${current:-$preferred}), already at preferred size"
             fi
             return
         fi
 
-        local screen_w first_w
-        screen_w=$(xrandr | head -1 | grep -oP 'current \K\d+')
-        first_w=$(xrandr | grep "^$(echo "$connected" | head -1)" | grep -oP '\d+x\d+' | head -1 | cut -dx -f1)
+        # Check if already properly extended
+        local screen_w=$(xrandr | head -1 | grep -oP 'current \K\d+')
+        local expected_w=0
+        for d in $connected; do
+            local w
+            w=$(get_preferred_mode "$d" | cut -dx -f1)
+            expected_w=$((expected_w + ${w:-0}))
+        done
 
-        if [ "$screen_w" -gt "$first_w" ] 2>/dev/null; then
+        if [ "$expected_w" -gt 0 ] && [ "$screen_w" -ge "$expected_w" ] 2>/dev/null; then
             log "Already extended (${screen_w}px wide), skipping"
             return
         fi
 
-        log "Mirrored layout detected with $count displays, extending..."
+        log "Extending $count displays (current: ${screen_w}px, expected: ${expected_w}px)..."
 
-        local args=""
-        for d in $connected; do
-            args="$args --output $d --auto"
-        done
-        xrandr $args
+        # Single atomic xrandr command with explicit modes and positions
+        extend_displays "$connected"
         sleep 1
 
-        local prev
-        prev=$(echo "$connected" | head -1)
-        for d in $(echo "$connected" | tail -n +2); do
-            xrandr --output "$d" --right-of "$prev"
-            prev="$d"
-        done
-        sleep 1
-
+        # Verify and retry if needed
         screen_w=$(xrandr | head -1 | grep -oP 'current \K\d+')
+        if [ "$screen_w" -lt "$expected_w" ] 2>/dev/null; then
+            log "First attempt got ${screen_w}px, retrying..."
+            sleep 2
+            extend_displays "$connected"
+            sleep 1
+            screen_w=$(xrandr | head -1 | grep -oP 'current \K\d+')
+        fi
+
         log "Layout applied: ${screen_w}px wide across $count displays"
     }
 
@@ -260,20 +300,31 @@ main() {
 
     info "Configuring: $DISPLAY1 (left) | $DISPLAY2 (right)"
 
-    xrandr --output "$DISPLAY1" --auto --output "$DISPLAY2" --auto
-    sleep 1
-    xrandr --output "$DISPLAY2" --right-of "$DISPLAY1"
-    sleep 1
+    # Use a single atomic xrandr command with explicit modes and positions
+    extend_displays "$CONNECTED"
+    sleep 2
 
     SCREEN_W=$(xrandr | head -1 | grep -oP 'current \K\d+')
-    FIRST_W=$(xrandr | grep "^$DISPLAY1" | grep -oP '\d+x\d+' | head -1 | cut -dx -f1)
+    D1_MODE=$(get_preferred_mode "$DISPLAY1")
+    FIRST_W=$(echo "${D1_MODE:-1920x1080}" | cut -dx -f1)
 
     if [ "$SCREEN_W" -gt "$FIRST_W" ] 2>/dev/null; then
         info "Extended desktop active: $(xrandr | head -1 | grep -oP 'current \K[0-9]+ x [0-9]+')"
     else
-        error "Display layout did not apply (screen width: ${SCREEN_W:-unknown})"
-        echo "  Try logging out and back in, or rebooting the VM."
-        exit 1
+        # Retry once — VMware tools can race with xrandr
+        warn "First attempt failed (${SCREEN_W}px), retrying..."
+        sleep 2
+        extend_displays "$CONNECTED"
+        sleep 2
+
+        SCREEN_W=$(xrandr | head -1 | grep -oP 'current \K\d+')
+        if [ "$SCREEN_W" -gt "$FIRST_W" ] 2>/dev/null; then
+            info "Extended desktop active: $(xrandr | head -1 | grep -oP 'current \K[0-9]+ x [0-9]+')"
+        else
+            error "Display layout did not apply (screen width: ${SCREEN_W:-unknown})"
+            echo "  Try logging out and back in, or rebooting the VM."
+            exit 1
+        fi
     fi
 
     # --- Step 6: Install and start persistent watcher ---
@@ -303,10 +354,10 @@ EOF
     # --- Step 7: Save XFCE display config (optional, best-effort) ---
 
     if [ "${XDG_CURRENT_DESKTOP:-}" = "XFCE" ] && command -v xfconf-query &>/dev/null; then
-        D1_RES=$(xrandr | grep "^$DISPLAY1" | grep -oP '\d+x\d+' | head -1)
-        D2_RES=$(xrandr | grep "^$DISPLAY2" | grep -oP '\d+x\d+' | head -1)
-        D1_X=$(xrandr | grep "^$DISPLAY1" | grep -oP '\d+x\d+\+\K\d+' | head -1)
-        D2_X=$(xrandr | grep "^$DISPLAY2" | grep -oP '\d+x\d+\+\K\d+' | head -1)
+        D1_RES=$(get_active_mode "$DISPLAY1")
+        D2_RES=$(get_active_mode "$DISPLAY2")
+        D1_X=$(xrandr | grep "^$DISPLAY1 " | grep -oP '\d+x\d+\+\K\d+' | head -1 || echo "0")
+        D2_X=$(xrandr | grep "^$DISPLAY2 " | grep -oP '\d+x\d+\+\K\d+' | head -1 || echo "${FIRST_W}")
 
         xfconf-query -c displays -p "/Default/$DISPLAY1/Active" --create -t string -s true 2>/dev/null || true
         xfconf-query -c displays -p "/Default/$DISPLAY1/Position/X" --create -t string -s "${D1_X:-0}" 2>/dev/null || true
@@ -337,4 +388,4 @@ case "${1:-}" in
     --watch)     watch_mode ;;
     --uninstall) uninstall_mode ;;
     *)           main ;;
-esac
+esac 
